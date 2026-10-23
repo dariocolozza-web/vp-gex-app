@@ -54,48 +54,51 @@ KINDS = {
     "Future ES (GEX SPX)": "ES",
     "Future NQ (GEX NDX)": "NQ",
     "ETF": "ETF",
-    "Azione": "STOCK",
+    "Stock": "STOCK",
 }
 
 st.title("📊 Volume Profile + GEX Analyzer")
-st.caption("Resonance QuantLab — Volume Profile e livelli di gamma exposure dei dealer "
-           "per future ES/NQ, ETF e azioni")
+st.caption("Resonance QuantLab — Volume Profile and dealer gamma exposure levels "
+           "for ES/NQ futures, ETFs and stocks")
 
 c1, c2, c3, c5, c4 = st.columns([2.2, 1.5, 2.2, 1.4, 1])
 with c1:
-    kind_label = st.selectbox("Strumento", list(KINDS.keys()))
+    kind_label = st.selectbox("Instrument", list(KINDS.keys()))
 kind = KINDS[kind_label]
 with c2:
     needs_ticker = kind in ("ETF", "STOCK")
     ticker = st.text_input(
         "Ticker", value="GLD" if kind == "ETF" else ("NVDA" if kind == "STOCK" else ""),
         disabled=not needs_ticker, key=f"ticker_{kind}",
-        placeholder="es. GLD, SPY" if kind == "ETF" else "es. NVDA, AAPL",
-        help="Ticker Yahoo Finance; deve avere opzioni quotate negli USA.",
+        placeholder="e.g. GLD, SPY" if kind == "ETF" else "e.g. NVDA, AAPL",
+        help="Yahoo Finance ticker; it must have US-listed options.",
     )
 with c3:
-    vp_days = st.slider("Sedute nel volume profile", 20, 250, core.VP_DAYS, 1,
-                        help="Numero di sedute usate per il Volume Profile (barre orarie).")
+    vp_days = st.slider("Volume profile sessions", 20, 250, core.VP_DAYS, 1,
+                        help="Number of sessions used to build the Volume Profile (hourly bars).")
 with c5:
-    n_exp_long = st.number_input("Scadenze 2° grafico", 2, 20, core.N_EXP_LONG, 1,
-                                 help="Quante scadenze sommare nel secondo grafico (pesate 1/√(DTE+1)), "
-                                      "partendo dalla più prossima.")
+    exp_days_long = st.number_input(
+        "Expiries within (days)", 1, core.MAX_EXP_DAYS,
+        core.make_instrument(kind, "X")["exp_days_long"], 1, key=f"expdays_{kind}",
+        help="Second chart: sums all expiries within this number of calendar days "
+             f"(max {core.MAX_EXP_DAYS}), weighted 1/√(DTE+1). "
+             "More days = more data to download and a slower analysis.")
 with c4:
     st.write("")
     st.write("")
-    run = st.button("Analizza", type="primary", width="stretch")
+    run = st.button("Analyze", type="primary", width="stretch")
 
 defaults = core.make_instrument(kind, ticker or "X")
-with st.expander("Impostazioni avanzate (finestre)"):
+with st.expander("Advanced settings (windows)"):
     a1, a2, a3 = st.columns(3)
     with a1:
-        strike_pct = st.number_input("Strike considerati (± % dallo spot)", 1.0, 30.0,
+        strike_pct = st.number_input("Strikes considered (± % from spot)", 1.0, 30.0,
                                      defaults["strike_pct"] * 100, 0.5, key=f"sp_{kind}") / 100
     with a2:
-        magnet_short = st.number_input("Gamma magnet, scadenza più prossima (± %)", 0.25, 15.0,
+        magnet_short = st.number_input("Gamma magnet, nearest expiry (± %)", 0.25, 15.0,
                                        defaults["magnet_short"] * 100, 0.25, key=f"ms_{kind}") / 100
     with a3:
-        magnet_long = st.number_input("Gamma magnet, 2° grafico (± %)", 0.25, 20.0,
+        magnet_long = st.number_input("Gamma magnet, second chart (± %)", 0.25, 20.0,
                                       defaults["magnet_long"] * 100, 0.25, key=f"ml_{kind}") / 100
 
 
@@ -117,7 +120,7 @@ def strike_table(ch, ctx, top=15):
     t = bs.loc[bs["net"].abs().sort_values(ascending=False).index[:top]].copy()
     out = pd.DataFrame({f"Strike {ctx['under']}": t.index.values})
     if ctx["is_future"]:
-        out[f"Livello {ctx['name']}"] = t.index.values + ctx["basis"]
+        out[f"{ctx['name']} level"] = t.index.values + ctx["basis"]
     out[f"Call GEX ($ {unit})"] = t["call"].values / div
     out[f"Put GEX ($ {unit})"] = t["put"].values / div
     out[f"Net GEX ($ {unit})"] = t["net"].values / div
@@ -126,22 +129,23 @@ def strike_table(ch, ctx, top=15):
 
 if run:
     if needs_ticker and not ticker.strip():
-        st.warning("Inserisci il ticker dell'ETF o dell'azione.")
+        st.warning("Enter the ETF or stock ticker.")
     elif not core.MASSIVE_API_KEY:
-        st.error("Chiave API Massive non configurata: aggiungi MASSIVE_API_KEY nei secrets dell'app.")
+        st.error("Massive API key not configured: add MASSIVE_API_KEY to the app secrets.")
     else:
         inst = core.make_instrument(kind, ticker, strike_pct=strike_pct,
                                     magnet_short=magnet_short, magnet_long=magnet_long)
         try:
-            with st.spinner(f"Scarico i dati e calcolo il profilo per {inst['name']}..."):
-                res = core.analyze(inst, vp_days=vp_days, n_exp_long=n_exp_long)
+            with st.spinner(f"Downloading data and running the analysis for {inst['name']}..."):
+                res = core.analyze(inst, vp_days=vp_days, exp_days_long=exp_days_long)
             for ch in res["charts"]:
                 ch["png"] = fig_to_png(ch.pop("fig"))
             st.session_state["result"] = res
             st.session_state["inst"] = inst
+            st.session_state["exp_days_used"] = exp_days_long
         except Exception as e:
             st.session_state.pop("result", None)
-            st.error(f"Analisi non riuscita per {inst['name']}: {e}")
+            st.error(f"Analysis failed for {inst['name']}: {e}")
 
 
 # ============================================================
@@ -151,7 +155,7 @@ if run:
 res = st.session_state.get("result")
 if res is None:
     if not run:
-        st.info("Scegli lo strumento e premi **Analizza** per generare l'analisi.")
+        st.info("Choose an instrument and press **Analyze** to run the analysis.")
 else:
     inst = st.session_state["inst"]
     ctx, px = res["ctx"], res["px"]
@@ -160,7 +164,7 @@ else:
 
     def lvl(x):
         if x is None or (isinstance(x, float) and np.isnan(x)):
-            return "n/d"
+            return "n/a"
         if inst["is_future"]:
             return f"{x + px['basis']:.2f}"
         return f"{x:.2f}"
@@ -172,17 +176,18 @@ else:
 
     st.subheader(f"{name} — {ctx['now'].strftime('%Y-%m-%d %H:%M')} ET")
     m1, m2, m3, m4, m5 = st.columns(5)
-    m1.metric(f"Ultimo {name}", f"{px['last']:.2f}")
-    m2.metric("POC", f"{poc:.2f}", f"{px['last'] - poc:+.2f} dal prezzo", delta_color="off")
+    m1.metric(f"Last {name}", f"{px['last']:.2f}")
+    m2.metric("POC", f"{poc:.2f}", f"price {px['last'] - poc:+.2f} vs POC", delta_color="off")
     m3.metric("Value Area (70%)", f"{val:.2f} – {vah:.2f}")
     if inst["is_future"]:
         m4.metric(f"Basis {name}-{under}", f"{px['basis']:+.2f}", help=px["basis_src"])
     else:
-        m4.metric("Spot usato per il GEX", f"{px['spot']:.2f}", help=px["spot_src"])
-    m5.metric("Stato mercato", res["state"], f"scadenza rif. {res['ref_date']:%d/%m}", delta_color="off")
+        m4.metric("Spot used for GEX", f"{px['spot']:.2f}", help=px["spot_src"])
+    m5.metric("Market state", res["state"], f"ref. expiry {res['ref_date']:%b %d}", delta_color="off")
 
-    tabs = st.tabs([f"Scadenza più prossima ({res['charts'][0]['label'].split(', ')[1]})",
-                    f"{len(res['charts'][1]['exps'])} scadenze (peso 1/√(DTE+1))"])
+    tabs = st.tabs([f"Nearest expiry ({res['charts'][0]['label'].split(', ')[1]})",
+                    f"Expiries within {st.session_state.get('exp_days_used', '')} days "
+                    f"({len(res['charts'][1]['exps'])}, weight 1/√(DTE+1))"])
     for tab, ch in zip(tabs, res["charts"]):
         with tab:
             k1, k2, k3, k4, k5 = st.columns(5)
@@ -197,40 +202,40 @@ else:
                       f"net GEX {ch['by_strike']['net'].sum() / div:+.2f} $ {unit}/1%", delta_color="off")
 
             st.image(ch["png"], width="stretch")
-            st.download_button("Scarica il grafico (PNG)", ch["png"],
+            st.download_button("Download chart (PNG)", ch["png"],
                                file_name=f"{name.lower()}_vp_gex_{ch['tag']}.png",
                                mime="image/png", key=f"dl_{ch['tag']}")
-            st.caption("Scadenze: " + ", ".join(e.strftime("%d %b %Y") for e in ch["exps"]))
+            st.caption("Expiries: " + ", ".join(e.strftime("%d %b %Y") for e in ch["exps"]))
 
-            st.markdown("**Strike con GEX più elevato**")
+            st.markdown("**Strikes with the largest GEX**")
             tbl = strike_table(ch, ctx)
             st.dataframe(tbl.style.format({c: "{:.2f}" for c in tbl.columns}),
                          hide_index=True, width="stretch")
 
-    with st.expander("Note metodologiche"):
+    with st.expander("Methodology notes"):
         fut_note = (
-            f"- **Future**: il volume profile usa la serie continua `{inst['vp_ticker']}` non aggiustata "
-            f"(prezzi realmente scambiati, come su TradingView). Gli strike di {under} sono traslati sul "
-            f"future con il basis {name}−{under}: in sessione su prezzi live, fuori sessione sulle chiusure "
-            f"delle 16:00. Nelle settimane dopo un roll trimestrale la parte vecchia del profilo può "
-            f"risultare sfasata di alcune decine di punti rispetto al contratto corrente.\n"
+            f"- **Futures**: the volume profile uses the unadjusted continuous series `{inst['vp_ticker']}` "
+            f"(prices actually traded, as on TradingView). {under} strikes are mapped onto the future with "
+            f"the {name}−{under} basis: live prices during the cash session, 4:00 pm closes outside it. "
+            f"In the weeks after a quarterly roll, the older part of the profile can be offset by a few "
+            f"tens of points versus the current contract.\n"
             if inst["is_future"] else
-            "- **ETF/azioni**: profilo e GEX sono sullo stesso strumento; lo spot è l'ultimo prezzo "
-            "disponibile, pre e after market compresi. Il gamma è calcolato con Black-Scholes "
-            "(approssimazione europea anche per opzioni americane).\n"
+            "- **ETFs/stocks**: profile and GEX are on the same instrument; spot is the last available "
+            "price, including pre- and after-market. Gamma is computed with Black-Scholes (European "
+            "approximation, also for American options).\n"
         )
         st.markdown(
-            f"- **Volume profile**: ultime {ctx['vp_days']} sedute su barre orarie (se non disponibili, "
-            f"daily), {core.VP_ROWS} righe; il volume di ogni barra è diviso tra le righe che attraversa. "
-            "Value area al 70% attorno al POC.\n"
-            "- **GEX**: open interest e volatilità implicita da Massive; gamma ricalcolato allo spot "
-            "corrente; convenzione dealer long call / short put; valori in $ per 1% di movimento.\n"
-            "- **Scadenze**: fino alle 16:00 ET si parte dalla scadenza di oggi, dopo dalla successiva "
-            "(weekend e festività NYSE esclusi).\n"
-            "- **Gamma flip**: livello in cui il GEX totale cambia segno. **Call/Put wall**: strike con "
-            "il GEX call/put più alto. **Gamma magnet**: strike con |net GEX| massimo vicino allo spot; "
-            "se positivo tende a fare da calamita (pinning), se negativo ad accelerare i movimenti.\n"
+            f"- **Volume profile**: last {ctx['vp_days']} sessions on hourly bars (daily bars if hourly "
+            f"data are unavailable), {core.VP_ROWS} rows; each bar's volume is split across the rows it "
+            "spans. 70% value area around the POC.\n"
+            "- **GEX**: open interest and implied volatility from Massive; gamma recomputed at the current "
+            "spot; dealer long call / short put convention; values in $ per 1% move.\n"
+            "- **Expiries**: until 4:00 pm ET the reference is today's expiry, afterwards the next one "
+            "(weekends and NYSE holidays excluded).\n"
+            "- **Gamma flip**: level where total GEX changes sign. **Call/Put wall**: strike with the "
+            "largest call/put GEX. **Gamma magnet**: strike with the largest |net GEX| near spot; if "
+            "positive it tends to pin price, if negative it tends to accelerate moves.\n"
             + fut_note +
-            "- I dati possono essere ritardati in base al piano Massive e ai limiti di Yahoo Finance. "
-            "Strumento di analisi, non una raccomandazione di investimento."
+            "- Data may be delayed depending on the Massive plan and Yahoo Finance limits. "
+            "Analysis tool only, not investment advice."
         )
