@@ -61,7 +61,7 @@ st.title("📊 Volume Profile + GEX Analyzer")
 st.caption("Resonance QuantLab — Volume Profile e livelli di gamma exposure dei dealer "
            "per future ES/NQ, ETF e azioni")
 
-c1, c2, c3, c4 = st.columns([2.2, 1.6, 2.2, 1])
+c1, c2, c3, c5, c4 = st.columns([2.2, 1.5, 2.2, 1.4, 1])
 with c1:
     kind_label = st.selectbox("Strumento", list(KINDS.keys()))
 kind = KINDS[kind_label]
@@ -76,6 +76,10 @@ with c2:
 with c3:
     vp_days = st.slider("Sedute nel volume profile", 20, 250, core.VP_DAYS, 1,
                         help="Numero di sedute usate per il Volume Profile (barre orarie).")
+with c5:
+    n_exp_long = st.number_input("Scadenze 2° grafico", 2, 20, core.N_EXP_LONG, 1,
+                                 help="Quante scadenze sommare nel secondo grafico (pesate 1/√(DTE+1)), "
+                                      "partendo dalla più prossima.")
 with c4:
     st.write("")
     st.write("")
@@ -91,7 +95,7 @@ with st.expander("Impostazioni avanzate (finestre)"):
         magnet_short = st.number_input("Gamma magnet, scadenza più prossima (± %)", 0.25, 15.0,
                                        defaults["magnet_short"] * 100, 0.25, key=f"ms_{kind}") / 100
     with a3:
-        magnet_long = st.number_input("Gamma magnet, 7 scadenze (± %)", 0.25, 20.0,
+        magnet_long = st.number_input("Gamma magnet, 2° grafico (± %)", 0.25, 20.0,
                                       defaults["magnet_long"] * 100, 0.25, key=f"ml_{kind}") / 100
 
 
@@ -130,7 +134,7 @@ if run:
                                     magnet_short=magnet_short, magnet_long=magnet_long)
         try:
             with st.spinner(f"Scarico i dati e calcolo il profilo per {inst['name']}..."):
-                res = core.analyze(inst, vp_days=vp_days)
+                res = core.analyze(inst, vp_days=vp_days, n_exp_long=n_exp_long)
             for ch in res["charts"]:
                 ch["png"] = fig_to_png(ch.pop("fig"))
             st.session_state["result"] = res
@@ -178,7 +182,7 @@ else:
     m5.metric("Stato mercato", res["state"], f"scadenza rif. {res['ref_date']:%d/%m}", delta_color="off")
 
     tabs = st.tabs([f"Scadenza più prossima ({res['charts'][0]['label'].split(', ')[1]})",
-                    "7 scadenze (peso 1/√(DTE+1))"])
+                    f"{len(res['charts'][1]['exps'])} scadenze (peso 1/√(DTE+1))"])
     for tab, ch in zip(tabs, res["charts"]):
         with tab:
             k1, k2, k3, k4, k5 = st.columns(5)

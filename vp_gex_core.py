@@ -15,8 +15,8 @@
 #       * prima dell'apertura e durante la sessione cash -> scadenza di oggi
 #       * dopo le 16:00 ET, weekend e festivita NYSE -> giorno di borsa successivo
 #    (se in quella data non c'e' una scadenza si usa la prima disponibile dopo).
-#  - Due grafici per strumento: (A) scadenza piu prossima, (B) 7 scadenze pesate
-#    1/sqrt(DTE+1).
+#  - Due grafici per strumento: (A) scadenza piu prossima, (B) N scadenze pesate
+#    1/sqrt(DTE+1) (N = 7 di default, parametro n_exp_long di analyze).
 #  - Gamma magnet: strike con |net GEX| massimo entro una finestra attorno allo
 #    spot; + = pinning, - = accelerazione.
 #  - Tutti i testi delle immagini sono in inglese.
@@ -698,7 +698,7 @@ def spot_and_basis(inst, daily, state, last_session):
                 basis_src=f"4:00 pm closes of {last_session:%Y-%m-%d}")
 
 
-def analyze(inst, now=None, vp_days=None):
+def analyze(inst, now=None, vp_days=None, n_exp_long=None):
     """
     Analizza uno strumento e restituisce un dizionario con:
       state, ref_date, last_session, vp (edges, vol, poc, val, vah), vp_src, sessions,
@@ -709,6 +709,10 @@ def analyze(inst, now=None, vp_days=None):
     """
     now = now or datetime.now(ET)
     vp_days = vp_days or VP_DAYS
+    n_long = int(n_exp_long or N_EXP_LONG)
+    # con piu' scadenze serve una finestra di ricerca piu' ampia (stessa proporzione)
+    if n_long > N_EXP_LONG:
+        inst = dict(inst, exp_search_days=int(np.ceil(inst["exp_search_days"] * n_long / N_EXP_LONG)))
     state, ref_date, last_session = market_context(now)
     name = inst["name"]
 
@@ -729,12 +733,14 @@ def analyze(inst, now=None, vp_days=None):
     nearest_dte = trading_days_between(ref_date, exps_all[0])
     configs = [
         (f"nearest expiry, {nearest_dte}DTE", N_EXP_SHORT, False, inst["magnet_short"], "nearest"),
-        ("7 expiries, weight 1/sqrt(DTE+1)", N_EXP_LONG, True, inst["magnet_long"], "7exp"),
+        (None, n_long, True, inst["magnet_long"], f"{n_long}exp"),
     ]
     charts = []
     for label, n, weighted, mwin, tag in configs:
         ctx["magnet_window"] = mwin
         exps = exps_all[:n]
+        if label is None:      # grafico multi-scadenza: numero reale di scadenze trovate
+            label = f"{len(exps)} expiries, weight 1/sqrt(DTE+1)"
         sub = chain[chain["expiration"].isin(exps)]
         gex = compute_gex(sub, px["spot"], now, ref_date, weighted, mwin, inst["strike_pct"])
         by_strike, flip, cw, pw, magnet, regime = gex
