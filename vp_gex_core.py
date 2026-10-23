@@ -50,6 +50,7 @@ VALUE_AREA_PCT = 0.70
 
 N_EXP_SHORT = 1            # grafico A: solo la scadenza piu prossima
 N_EXP_LONG = 7             # grafico B: 7 scadenze
+MAX_EXP_DAYS = 60          # massimo dei giorni per il grafico B nella modalita' 'entro N giorni'
 TOP_N_STRIKES = 8          # strike con |GEX| maggiore da etichettare
 GEX_BAR_ALPHA = 0.45       # trasparenza barre GEX (0 = invisibili, 1 = piene)
 FLIP_GRID_POINTS = 401     # punti della griglia per il gamma flip
@@ -79,14 +80,17 @@ def set_api_key(key):
 #   magnet_short    finestra gamma magnet, grafico scadenza piu prossima
 #   magnet_long     finestra gamma magnet, grafico 7 scadenze
 #   exp_search_days giorni di calendario in cui cercare le scadenze
+#   exp_days_long   default dell'app: scadenze entro N giorni nel secondo grafico
 FUTURE_ES = dict(name="ES", vp_ticker="ES=F", under="SPX", opt_underlying="I:SPX", under_yf="^GSPC",
                  is_future=True, pm_prefixes=("O:SPXW",), strike_pct=0.05,
-                 magnet_short=0.01, magnet_long=0.02, exp_search_days=21)
+                 magnet_short=0.01, magnet_long=0.02, exp_search_days=21, exp_days_long=10)
 FUTURE_NQ = dict(name="NQ", vp_ticker="NQ=F", under="NDX", opt_underlying="I:NDX", under_yf="^NDX",
                  is_future=True, pm_prefixes=("O:NDXP",), strike_pct=0.05,
-                 magnet_short=0.01, magnet_long=0.02, exp_search_days=21)
-ETF_DEFAULTS = dict(strike_pct=0.05, magnet_short=0.015, magnet_long=0.03, exp_search_days=60)
-STOCK_DEFAULTS = dict(strike_pct=0.10, magnet_short=0.02, magnet_long=0.04, exp_search_days=60)
+                 magnet_short=0.01, magnet_long=0.02, exp_search_days=21, exp_days_long=10)
+ETF_DEFAULTS = dict(strike_pct=0.05, magnet_short=0.015, magnet_long=0.03, exp_search_days=60,
+                    exp_days_long=21)
+STOCK_DEFAULTS = dict(strike_pct=0.10, magnet_short=0.02, magnet_long=0.04, exp_search_days=60,
+                      exp_days_long=45)
 
 
 def make_instrument(kind, ticker=None, **overrides):
@@ -101,13 +105,13 @@ def make_instrument(kind, ticker=None, **overrides):
         inst = dict(FUTURE_NQ)
     elif kind in ("ETF", "STOCK"):
         if not ticker:
-            raise ValueError("serve il ticker per ETF e azioni")
+            raise ValueError("a ticker is required for ETFs and stocks")
         t = ticker.strip().upper()
         inst = dict(name=t, vp_ticker=t, under=t, opt_underlying=t, under_yf=t,
                     is_future=False, pm_prefixes=None,
                     **(ETF_DEFAULTS if kind == "ETF" else STOCK_DEFAULTS))
     else:
-        raise ValueError(f"tipo di strumento sconosciuto: {kind}")
+        raise ValueError(f"unknown instrument type: {kind}")
     inst.update({k: v for k, v in overrides.items() if v is not None})
     return inst
 
@@ -223,7 +227,7 @@ def _to_et(h):
 def load_daily(ticker, period="1y"):
     h = yf.Ticker(ticker).history(period=period, interval="1d", auto_adjust=False)
     if h is None or h.empty or "Close" not in h:
-        raise ValueError(f"nessun dato su yfinance per il ticker '{ticker}'")
+        raise ValueError(f"no Yahoo Finance data for ticker '{ticker}'")
     h = h[["Open", "High", "Low", "Close", "Volume"]].copy()
     h.index = pd.to_datetime(h.index).tz_localize(None).normalize()
     h = h[~h.index.duplicated(keep="last")]
@@ -373,7 +377,7 @@ def massive_index_live(ticker):
 
 def fetch_chain(inst, spot, ref_date):
     if not MASSIVE_API_KEY:
-        raise RuntimeError("chiave API Massive non impostata (MASSIVE_API_KEY)")
+        raise RuntimeError("Massive API key not set (MASSIVE_API_KEY)")
     url = f"{MASSIVE_BASE_URL}/v3/snapshot/options/{inst['opt_underlying']}"
     pct = inst["strike_pct"]
     params = {
@@ -405,8 +409,8 @@ def fetch_chain(inst, spot, ref_date):
         params = {"apiKey": MASSIVE_API_KEY}
     df = pd.DataFrame(rows)
     if df.empty:
-        raise RuntimeError(f"Massive non ha restituito opzioni per {inst['opt_underlying']} "
-                           f"(strumento senza opzioni quotate o non incluso nel piano)")
+        raise RuntimeError(f"Massive returned no options for {inst['opt_underlying']} "
+                           f"(no listed options, or not included in your plan)")
     df["expiration"] = pd.to_datetime(df["expiration"]).dt.date
     df["strike"] = df["strike"].astype(float)
     return df
@@ -698,20 +702,27 @@ def spot_and_basis(inst, daily, state, last_session):
                 basis_src=f"4:00 pm closes of {last_session:%Y-%m-%d}")
 
 
-def analyze(inst, now=None, vp_days=None, n_exp_long=None):
+def analyze(inst, now=None, vp_days=None, n_exp_long=None, exp_days_long=None):
     """
     Analizza uno strumento e restituisce un dizionario con:
       state, ref_date, last_session, vp (edges, vol, poc, val, vah), vp_src, sessions,
       px (last, basis, spot, ...), exps_all e charts: una voce per grafico con
       label, tag, exps, fig, by_strike, flip, call_wall, put_wall, magnet, regime,
       unit (div, nome) e caption (testo riassuntivo in inglese).
+    Secondo grafico: se exp_days_long e' indicato, tutte le scadenze entro quei giorni
+    di calendario dalla scadenza di riferimento (max MAX_EXP_DAYS); altrimenti le prime
+    n_exp_long scadenze (7 di default).
     Le figure matplotlib restano aperte: chi chiama le chiude con plt.close().
     """
     now = now or datetime.now(ET)
     vp_days = vp_days or VP_DAYS
     n_long = int(n_exp_long or N_EXP_LONG)
-    # con piu' scadenze serve una finestra di ricerca piu' ampia (stessa proporzione)
-    if n_long > N_EXP_LONG:
+    days_long = min(int(exp_days_long), MAX_EXP_DAYS) if exp_days_long else None
+    if days_long:
+        # la ricerca deve coprire sia la finestra richiesta sia la scadenza piu' prossima
+        inst = dict(inst, exp_search_days=max(inst["exp_search_days"], days_long))
+    elif n_long > N_EXP_LONG:
+        # con piu' scadenze serve una finestra di ricerca piu' ampia (stessa proporzione)
         inst = dict(inst, exp_search_days=int(np.ceil(inst["exp_search_days"] * n_long / N_EXP_LONG)))
     state, ref_date, last_session = market_context(now)
     name = inst["name"]
@@ -733,14 +744,19 @@ def analyze(inst, now=None, vp_days=None, n_exp_long=None):
     nearest_dte = trading_days_between(ref_date, exps_all[0])
     configs = [
         (f"nearest expiry, {nearest_dte}DTE", N_EXP_SHORT, False, inst["magnet_short"], "nearest"),
-        (None, n_long, True, inst["magnet_long"], f"{n_long}exp"),
+        (None, n_long, True, inst["magnet_long"], f"{days_long}d" if days_long else f"{n_long}exp"),
     ]
     charts = []
     for label, n, weighted, mwin, tag in configs:
         ctx["magnet_window"] = mwin
-        exps = exps_all[:n]
-        if label is None:      # grafico multi-scadenza: numero reale di scadenze trovate
-            label = f"{len(exps)} expiries, weight 1/sqrt(DTE+1)"
+        if label is None and days_long:
+            # tutte le scadenze entro days_long giorni; almeno la piu' prossima
+            exps = [e for e in exps_all if (e - ref_date).days <= days_long] or exps_all[:1]
+            label = f"expiries within {days_long} days ({len(exps)}), weight 1/sqrt(DTE+1)"
+        else:
+            exps = exps_all[:n]
+            if label is None:  # grafico multi-scadenza: numero reale di scadenze trovate
+                label = f"{len(exps)} expiries, weight 1/sqrt(DTE+1)"
         sub = chain[chain["expiration"].isin(exps)]
         gex = compute_gex(sub, px["spot"], now, ref_date, weighted, mwin, inst["strike_pct"])
         by_strike, flip, cw, pw, magnet, regime = gex
