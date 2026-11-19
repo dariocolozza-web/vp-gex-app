@@ -74,7 +74,7 @@ with c2:
         help="Yahoo Finance ticker; it must have US-listed options.",
     )
 with c3:
-    vp_days = st.slider("Volume profile sessions", 20, 750, core.VP_DAYS, 1,
+    vp_days = st.slider("Volume profile sessions", 20, 500, core.VP_DAYS, 1,
                         help="Number of sessions used to build the Volume Profile (hourly bars).")
 with c5:
     exp_days_long = st.number_input(
