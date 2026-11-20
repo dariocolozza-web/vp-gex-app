@@ -74,8 +74,10 @@ with c2:
         help="Yahoo Finance ticker; it must have US-listed options.",
     )
 with c3:
-    vp_days = st.slider("Volume profile sessions", 20, 500, core.VP_DAYS, 1,
-                        help="Number of sessions used to build the Volume Profile (hourly bars).")
+    vp_days = st.slider("Volume profile sessions", 20, core.VP_MAX_DAYS, core.VP_DAYS, 1,
+                        help="Number of sessions used to build the Volume Profile. Hourly bars "
+                             "cover about the last 500 sessions (Yahoo Finance limit of 730 days); "
+                             "older sessions use daily bars.")
 with c5:
     exp_days_long = st.number_input(
         "Expiries within (days)", 1, core.MAX_EXP_DAYS,
@@ -225,9 +227,10 @@ else:
             "approximation, also for American options).\n"
         )
         st.markdown(
-            f"- **Volume profile**: last {ctx['vp_days']} sessions on hourly bars (daily bars if hourly "
-            f"data are unavailable), {core.VP_ROWS} rows; each bar's volume is split across the rows it "
-            "spans. 70% value area around the POC.\n"
+            f"- **Volume profile**: last {ctx['vp_days']} sessions ({ctx['vp_src']}), {core.VP_ROWS} rows; "
+            "hourly bars where available, daily bars for sessions older than the ~730 days of hourly "
+            "history Yahoo Finance provides (or when hourly data are missing). Each bar's volume is "
+            "split across the rows it spans. 70% value area around the POC.\n"
             "- **GEX**: open interest and implied volatility from Massive; gamma recomputed at the current "
             "spot; dealer long call / short put convention; values in $ per 1% move.\n"
             "- **Expiries**: until 4:00 pm ET the reference is today's expiry, afterwards the next one "

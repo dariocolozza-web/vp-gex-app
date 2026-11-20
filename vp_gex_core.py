@@ -43,7 +43,9 @@ MASSIVE_API_KEY = os.environ.get("MASSIVE_API_KEY", "")
 MASSIVE_BASE_URL = "https://api.massive.com"
 
 VP_DAYS = 62               # sedute nel volume profile (default)
+VP_MAX_DAYS = 750          # massimo delle sedute selezionabili per il volume profile
 VP_ROWS = 200              # righe del profilo (come nel Volume Profile Analyzer)
+HOURLY_MAX_DAYS = 728      # yfinance fornisce barre 1h solo per gli ultimi 730 giorni di calendario
 VP_USE_HOURLY = True       # True: barre 1h; False (o orarie non disponibili): barre daily
 VP_MIN_BARS_PER_SESSION = 4  # sotto questa media di barre orarie per seduta -> barre daily
 VALUE_AREA_PCT = 0.70
@@ -245,10 +247,16 @@ def load_live_yf(ticker):
     return float(h["Close"].iloc[-1]) if not h.empty else np.nan
 
 
-def load_hourly(ticker):
-    """Barre 1h (yfinance le fornisce fino a 730 giorni); per le azioni solo sessione regolare."""
+def load_hourly(ticker, days=180):
+    """
+    Barre 1h degli ultimi `days` giorni di calendario (yfinance le fornisce al massimo
+    per gli ultimi 730 giorni, quindi days e' limitato a HOURLY_MAX_DAYS);
+    per le azioni solo sessione regolare.
+    """
+    days = int(min(days, HOURLY_MAX_DAYS))
+    start = (datetime.now(ET) - timedelta(days=days)).date()
     try:
-        h = yf.Ticker(ticker).history(period="6mo", interval="1h")
+        h = yf.Ticker(ticker).history(start=start.isoformat(), interval="1h")
     except Exception as e:
         print(f"[yfinance] barre orarie {ticker} non disponibili ({e})")
         return pd.DataFrame()
@@ -333,23 +341,44 @@ def value_area(edges, vol, pct):
 
 
 def volume_profile_for(inst, vp_days=None):
-    """Profilo delle ultime vp_days sedute: barre 1h se disponibili, altrimenti daily."""
-    daily = load_daily(inst["vp_ticker"])
+    """
+    Profilo delle ultime vp_days sedute (fino a VP_MAX_DAYS).
+    Ogni seduta usa le barre 1h se disponibili, altrimenti la barra daily: oltre i
+    ~730 giorni di calendario coperti dalle orarie di yfinance (circa 500 sedute)
+    le sedute piu' vecchie entrano nel profilo con la barra daily.
+    """
+    vp_days = int(min(vp_days or VP_DAYS, VP_MAX_DAYS))
+    # storico daily sufficiente a coprire le sedute richieste (~252 sedute l'anno)
+    period = "1y" if vp_days <= 240 else ("2y" if vp_days <= 490 else "5y")
+    daily = load_daily(inst["vp_ticker"], period)
     daily = daily[daily["Volume"] > 0]
-    sessions = daily.index[-(vp_days or VP_DAYS):]
+    sessions = daily.index[-vp_days:]
 
-    bars, src = None, ""
+    hourly_ok = pd.DatetimeIndex([])
+    hourly = pd.DataFrame()
     if VP_USE_HOURLY:
-        hourly = load_hourly(inst["vp_ticker"])
+        # giorni di calendario necessari: ~7/5 per i weekend, piu' festivita' e margine
+        hourly = load_hourly(inst["vp_ticker"], int(np.ceil(vp_days * 1.5)) + 10)
         if not hourly.empty:
             hourly = add_session_date(hourly)
-            hourly = hourly[(hourly["Volume"] > 0) & hourly["session"].isin(sessions)]
-            if len(hourly) >= VP_MIN_BARS_PER_SESSION * len(sessions):
-                bars, src = hourly, f"1h bars ({len(hourly)})"
-            else:
-                print(f"[VP {inst['name']}] solo {len(hourly)} barre orarie, uso le daily")
-    if bars is None:
-        bars = daily.loc[sessions]
+            first_dl = hourly["session"].min()   # prima seduta scaricata: puo' essere parziale
+            hourly = hourly[(hourly["Volume"] > 0) & hourly["session"].isin(sessions)
+                            & (hourly["session"] > first_dl)]
+            counts = hourly.groupby("session").size()
+            hourly_ok = pd.DatetimeIndex(counts[counts >= VP_MIN_BARS_PER_SESSION].index)
+            hourly = hourly[hourly["session"].isin(hourly_ok)]
+
+    daily_sessions = sessions.difference(hourly_ok)
+    n_h, n_d = len(hourly), len(daily_sessions)
+    cols = ["Open", "High", "Low", "Close", "Volume"]
+    if n_h and n_d:
+        bars = pd.concat([daily.loc[daily_sessions, cols], hourly[cols]], ignore_index=True)
+        src = f"1h bars ({n_h}) + daily bars ({n_d} sessions)"
+        print(f"[VP {inst['name']}] {len(hourly_ok)} sedute su barre 1h, {n_d} su barre daily")
+    elif n_h:
+        bars, src = hourly[cols], f"1h bars ({n_h})"
+    else:
+        bars = daily.loc[sessions, cols]
         src = "daily bars" + (" (hourly unavailable)" if VP_USE_HOURLY else "")
 
     edges, vol = build_volume_profile(bars, VP_ROWS)
@@ -715,7 +744,7 @@ def analyze(inst, now=None, vp_days=None, n_exp_long=None, exp_days_long=None):
     Le figure matplotlib restano aperte: chi chiama le chiude con plt.close().
     """
     now = now or datetime.now(ET)
-    vp_days = vp_days or VP_DAYS
+    vp_days = int(min(vp_days or VP_DAYS, VP_MAX_DAYS))
     n_long = int(n_exp_long or N_EXP_LONG)
     days_long = min(int(exp_days_long), MAX_EXP_DAYS) if exp_days_long else None
     if days_long:
