@@ -59,7 +59,7 @@ FLIP_GRID_POINTS = 401     # punti della griglia per il gamma flip
 SHOW_PRICE_PANEL = True    # mostra l'andamento del prezzo nel grafico (False: solo profilo + GEX)
 CHART_LAYOUT = "panel"     # "panel": prezzo in un pannello a sinistra; "overlay": tutto sovrapposto
 VP_OVERLAY_WIDTH = 0.35    # overlay: larghezza massima del volume profile (quota del grafico, da sinistra)
-GEX_OVERLAY_WIDTH = 0.40   # overlay: ampiezza totale delle barre GEX centrate (quota del grafico)
+GEX_OVERLAY_WIDTH = 0.60   # overlay: ampiezza totale delle barre GEX centrate (quota del grafico)
 CANDLE_MAX_SESSIONS = 150  # fino a queste sedute candele daily; oltre, linea delle chiusure + range high-low
 
 ET = ZoneInfo("America/New_York")
