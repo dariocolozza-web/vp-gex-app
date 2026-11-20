@@ -56,6 +56,11 @@ MAX_EXP_DAYS = 60          # massimo dei giorni per il grafico B nella modalita'
 TOP_N_STRIKES = 8          # strike con |GEX| maggiore da etichettare
 GEX_BAR_ALPHA = 0.45       # trasparenza barre GEX (0 = invisibili, 1 = piene)
 FLIP_GRID_POINTS = 401     # punti della griglia per il gamma flip
+SHOW_PRICE_PANEL = True    # mostra l'andamento del prezzo nel grafico (False: solo profilo + GEX)
+CHART_LAYOUT = "panel"     # "panel": prezzo in un pannello a sinistra; "overlay": tutto sovrapposto
+VP_OVERLAY_WIDTH = 0.35    # overlay: larghezza massima del volume profile (quota del grafico, da sinistra)
+GEX_OVERLAY_WIDTH = 0.40   # overlay: ampiezza totale delle barre GEX centrate (quota del grafico)
+CANDLE_MAX_SESSIONS = 150  # fino a queste sedute candele daily; oltre, linea delle chiusure + range high-low
 
 ET = ZoneInfo("America/New_York")
 SESSION_OPEN = time(9, 30)
@@ -567,40 +572,104 @@ def _spread_labels(ys, min_gap):
     return out
 
 
-def make_chart(vp, gex, ctx, label, exps):
+def _plot_price(axp, price, last):
+    """
+    Andamento del prezzo sulle sedute del profilo, su asse x a posizioni intere
+    (niente buchi per weekend e festivita'): candele daily se le sedute sono poche,
+    altrimenti linea delle chiusure con il range high-low ombreggiato.
+    """
+    n = len(price)
+    x = np.arange(n)
+    o, h, l, c = (price[k].to_numpy(dtype=float) for k in ("Open", "High", "Low", "Close"))
+    if n <= CANDLE_MAX_SESSIONS:
+        col = np.where(c >= o, "seagreen", "indianred")
+        axp.vlines(x, l, h, color=col, linewidth=0.8)
+        body = np.abs(c - o)
+        body = np.where(body > 0, body, (h - l).mean() * 0.01)  # doji visibili
+        axp.bar(x, body, bottom=np.minimum(o, c), width=0.6, color=col, edgecolor=col, linewidth=0.5)
+    else:
+        axp.fill_between(x, l, h, color="gray", alpha=0.3, linewidth=0, label="Daily high-low")
+        axp.plot(x, c, color="black", linewidth=1.0, label="Daily close")
+    # ultimo prezzo (live) a destra dell'ultima seduta
+    axp.plot([n - 1 + 0.8], [last], marker="<", color="black", markersize=7, clip_on=False)
+    axp.set_xlim(-1, n + 1)
+
+    # etichette delle date: ~8 tacche
+    step = max(1, int(np.ceil(n / 8)))
+    ticks = list(range(0, n, step))
+    fmt = "%b %d" if n <= 260 else "%b '%y"
+    axp.set_xticks(ticks)
+    axp.set_xticklabels([price.index[i].strftime(fmt) for i in ticks], rotation=30, ha="right",
+                        fontsize=8)
+    axp.grid(axis="y", color="lightgray", linewidth=0.5, alpha=0.6)
+
+
+def make_chart(vp, gex, ctx, label, exps, layout=None):
+    """
+    layout: "panel" (prezzo in un pannello a sinistra, stessa scala), "overlay" (prezzo,
+    volume profile e GEX sovrapposti nello stesso riquadro) o "profile" (solo profilo + GEX).
+    Default: CHART_LAYOUT, oppure "profile" se SHOW_PRICE_PANEL e' False.
+    """
     edges, vol, poc, val, vah = vp
     by_strike, flip, call_wall, put_wall, magnet, regime = gex
     basis = ctx["basis"]
     name, under = ctx["name"], ctx["under"]
 
-    fig, ax = plt.subplots(figsize=(13, 11))
-    fig.subplots_adjust(left=0.08, right=0.74, top=0.89, bottom=0.15)
+    price = ctx.get("price")
+    layout = layout or (CHART_LAYOUT if SHOW_PRICE_PANEL else "profile")
+    if price is None or len(price) < 2:
+        layout = "profile"
+    overlay = layout == "overlay"
 
-    # --- Volume profile
+    axp = None
+    if layout == "panel":
+        fig, (axp, ax) = plt.subplots(1, 2, sharey=True, figsize=(19, 11),
+                                      gridspec_kw=dict(width_ratios=[1.1, 1.0], wspace=0.03))
+        fig.subplots_adjust(left=0.055, right=0.80, top=0.89, bottom=0.15)
+        ax.tick_params(labelleft=False)
+    elif overlay:
+        fig, ax = plt.subplots(figsize=(17, 11))
+        fig.subplots_adjust(left=0.06, right=0.78, top=0.89, bottom=0.15)
+    else:
+        fig, ax = plt.subplots(figsize=(13, 11))
+        fig.subplots_adjust(left=0.08, right=0.74, top=0.89, bottom=0.15)
+
+    # --- Volume profile (overlay: barre piu' leggere, ancorate a sinistra, larghe al massimo
+    #     VP_OVERLAY_WIDTH del grafico)
     mids = (edges[:-1] + edges[1:]) / 2
     row_h = edges[1] - edges[0]
     vnorm = vol / vol.max()
     in_va = (mids >= val) & (mids <= vah)
-    ax.barh(mids[~in_va], vnorm[~in_va], height=row_h * 0.9,
-            color="steelblue", alpha=0.25)
-    ax.barh(mids[in_va], vnorm[in_va], height=row_h * 0.9,
-            color="steelblue", alpha=0.50)
-    ax.set_xlim(0, 1.05)
-    ax.set_xlabel(f"Normalized volume ({ctx['vp_days']} sessions, {ctx['vp_src']}, {VP_ROWS} rows)")
-    ax.set_ylabel(f"{name} price")
+    a_out, a_in = (0.18, 0.35) if overlay else (0.25, 0.50)
+    ax.barh(mids[~in_va], vnorm[~in_va], height=row_h * 0.9, color="steelblue", alpha=a_out)
+    ax.barh(mids[in_va], vnorm[in_va], height=row_h * 0.9, color="steelblue", alpha=a_in)
+    vp_txt = f"Normalized volume ({ctx['vp_days']} sessions, {ctx['vp_src']}, {VP_ROWS} rows)"
+    ax.set_ylabel(f"{name} price") if axp is None else axp.set_ylabel(f"{name} price")
+    if overlay:
+        ax.set_xlim(0, 1 / VP_OVERLAY_WIDTH)
+        ax.set_xticks([])
+        ax.axhspan(val, vah, color="steelblue", alpha=0.05, linewidth=0)
+    else:
+        ax.set_xlim(0, 1.05)
+        ax.set_xlabel(vp_txt)
+    if axp is not None:
+        axp.axhspan(val, vah, color="steelblue", alpha=0.07, linewidth=0)  # value area sul prezzo
 
-    # --- GEX (asse x superiore)
+    # --- GEX (asse x superiore). Overlay: barre centrate nel grafico, larghe al massimo
+    #     GEX_OVERLAY_WIDTH della larghezza complessiva (meta' per lato)
     ax2 = ax.twiny()
     strikes_px = by_strike.index.values + basis
     div, unit = gex_unit(by_strike["net"].values)
     g = by_strike["net"].values / div
     gmax = np.abs(g).max() if len(g) and np.abs(g).max() > 0 else 1.0
-    ax2.set_xlim(-gmax * 1.25, gmax * 1.25)
     step = np.median(np.diff(by_strike.index.values)) if len(by_strike) > 1 else row_h
-    ax2.barh(strikes_px, g, height=step * 0.7,
-             color=np.where(g >= 0, "green", "red"), alpha=GEX_BAR_ALPHA,
-             edgecolor=np.where(g >= 0, "darkgreen", "darkred"), linewidth=0.6)
-    ax2.axvline(0, color="gray", linewidth=0.8)
+    colors = np.where(g >= 0, "green", "red")
+    edgecolors = np.where(g >= 0, "darkgreen", "darkred")
+    half = gmax / GEX_OVERLAY_WIDTH if overlay else gmax * 1.25
+    ax2.set_xlim(-half, half)                     # zero al centro del grafico
+    ax2.barh(strikes_px, g, height=step * 0.7, color=colors, alpha=GEX_BAR_ALPHA,
+             edgecolor=edgecolors, linewidth=0.6)
+    ax2.axvline(0, color="gray", linewidth=0.8, alpha=0.6 if overlay else 1.0)
     ax2.set_xlabel(f"{under} net GEX ($ {unit} per 1% move)")
 
     # Etichette sugli strike con |GEX| maggiore (scarta quelle troppo vicine fra loro)
@@ -616,13 +685,28 @@ def make_chart(vp, gex, ctx, label, exps):
     for k in top:
         v = by_strike.loc[k, "net"] / div
         txt = (f"{k:.0f} | {k + basis:.0f}" if ctx["is_future"] else fmt_strike(k))
+        c = "darkgreen" if v >= 0 else "darkred"
         ax2.text(v + np.sign(v) * gmax * 0.02, k + basis, txt, fontsize=7.5,
-                 ha="left" if v >= 0 else "right", va="center",
-                 color="darkgreen" if v >= 0 else "darkred")
+                 ha="left" if v >= 0 else "right", va="center", color=c,
+                 bbox=dict(facecolor="white", edgecolor="none", alpha=0.6, pad=0.5) if overlay else None)
+
+    # --- Prezzo. Overlay: asse creato per ultimo, cosi' la linea resta sopra le barre
+    if overlay:
+        axp = ax.twiny()
+        _plot_price(axp, price, ctx["last"])
+        axp.xaxis.set_ticks_position("bottom")
+        axp.xaxis.set_label_position("bottom")
+        axp.set_xlabel(f"{name} daily price ({len(price)} sessions)  |  {vp_txt}", fontsize=9)
+    elif axp is not None:
+        _plot_price(axp, price, ctx["last"])
+        axp.set_xlabel(f"{name} daily price ({len(price)} sessions)")
 
     # --- Range verticale
     y_lo = min(edges[0], strikes_px.min() if len(strikes_px) else edges[0])
     y_hi = max(edges[-1], strikes_px.max() if len(strikes_px) else edges[-1])
+    if axp is not None:  # il pannello del prezzo deve restare tutto visibile (anche l'ultimo prezzo)
+        y_lo = min(y_lo, float(price["Low"].min()), ctx["last"])
+        y_hi = max(y_hi, float(price["High"].max()), ctx["last"])
     pad = (y_hi - y_lo) * 0.02
     ax.set_ylim(y_lo - pad, y_hi + pad)
 
@@ -650,7 +734,12 @@ def make_chart(vp, gex, ctx, label, exps):
                        mk + basis, "darkgreen" if msign > 0 else "darkred", "-.", 2.6))
 
     for _, y, c, ls, lw in levels:
+        if overlay:
+            axp.axhline(y, color=c, linestyle=ls, linewidth=lw * 0.8, alpha=0.75)
+            continue
         ax.axhline(y, color=c, linestyle=ls, linewidth=lw, alpha=0.9)
+        if axp is not None:  # stessi livelli, piu' leggeri, anche sul pannello del prezzo
+            axp.axhline(y, color=c, linestyle=ls, linewidth=lw * 0.6, alpha=0.6)
 
     ys = [l[1] for l in levels]
     ylab = _spread_labels(ys, (y_hi - y_lo + 2 * pad) * 0.032)
@@ -668,14 +757,21 @@ def make_chart(vp, gex, ctx, label, exps):
         mpatches.Patch(facecolor="green", edgecolor="darkgreen", alpha=GEX_BAR_ALPHA, label="Net GEX > 0"),
         mpatches.Patch(facecolor="red", edgecolor="darkred", alpha=GEX_BAR_ALPHA, label="Net GEX < 0"),
     ]
-    ax.legend(handles=handles, loc="lower right", fontsize=9)
+    if overlay:
+        handles.insert(0, plt.Line2D([], [], color="black", linewidth=1.2, label=f"{name} daily price"))
+        fig.legend(handles=handles, loc="lower right", bbox_to_anchor=(0.99, 0.015), fontsize=9)
+    else:
+        ax.legend(handles=handles, loc="lower right", fontsize=9)
 
     # --- Titolo e riquadro informativo
     exp_txt = ", ".join(e.strftime("%b %d") for e in exps)
     gex_name = f"{under} GEX" if ctx["is_future"] else "GEX"
-    ax.set_title(f"{name} - {ctx['vp_days']}-session Volume Profile + {gex_name} ({label})\n"
-                 f"Expiries: {exp_txt}   |   {ctx['now'].strftime('%Y-%m-%d %H:%M')} ET",
-                 fontsize=12, pad=38)
+    title = (f"{name} - {ctx['vp_days']}-session Volume Profile + {gex_name} ({label})\n"
+             f"Expiries: {exp_txt}   |   {ctx['now'].strftime('%Y-%m-%d %H:%M')} ET")
+    if layout != "panel":
+        ax.set_title(title, fontsize=12, pad=38)
+    else:
+        fig.suptitle(title, fontsize=13, y=0.975)
     if ctx["is_future"]:
         line2 = (f"Basis {name}-{under}: {basis:+.2f} ({ctx['basis_src']})  |  ")
         series = f"{ctx['vp_ticker']} continuous, unadjusted  |  Strike labels: {under} | {name}"
@@ -689,7 +785,8 @@ def make_chart(vp, gex, ctx, label, exps):
             + f"Total net GEX: {by_strike['net'].sum() / div:+.2f} $ {unit}/1%  |  Gamma regime: {regime}  |  "
             f"Magnet window: +/-{ctx['magnet_window'] * 100:g}% of spot\n"
             f"Price series: {series}")
-    fig.text(0.08, 0.02, info, fontsize=8.5, family="monospace", va="bottom")
+    fig.text(0.055 if axp is not None else 0.08, 0.02, info, fontsize=8.5, family="monospace",
+             va="bottom")
     return fig
 
 
@@ -731,7 +828,7 @@ def spot_and_basis(inst, daily, state, last_session):
                 basis_src=f"4:00 pm closes of {last_session:%Y-%m-%d}")
 
 
-def analyze(inst, now=None, vp_days=None, n_exp_long=None, exp_days_long=None):
+def analyze(inst, now=None, vp_days=None, n_exp_long=None, exp_days_long=None, layout=None):
     """
     Analizza uno strumento e restituisce un dizionario con:
       state, ref_date, last_session, vp (edges, vol, poc, val, vah), vp_src, sessions,
@@ -767,7 +864,8 @@ def analyze(inst, now=None, vp_days=None, n_exp_long=None, exp_days_long=None):
 
     ctx = dict(now=now, state=state, ref_date=ref_date, vp_src=vp_src, vp_days=vp_days, **px,
                name=name, under=inst["under"], is_future=inst["is_future"],
-               vp_ticker=inst["vp_ticker"])
+               vp_ticker=inst["vp_ticker"],
+               price=daily.loc[sessions, ["Open", "High", "Low", "Close"]])
     basis = px["basis"]
 
     nearest_dte = trading_days_between(ref_date, exps_all[0])
@@ -789,7 +887,7 @@ def analyze(inst, now=None, vp_days=None, n_exp_long=None, exp_days_long=None):
         sub = chain[chain["expiration"].isin(exps)]
         gex = compute_gex(sub, px["spot"], now, ref_date, weighted, mwin, inst["strike_pct"])
         by_strike, flip, cw, pw, magnet, regime = gex
-        fig = make_chart(vp, gex, ctx, label, exps)
+        fig = make_chart(vp, gex, ctx, label, exps, layout)
 
         def fmt(x):
             return "n/a" if np.isnan(x) else fmt_level(x, ctx)

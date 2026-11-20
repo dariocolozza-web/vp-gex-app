@@ -90,6 +90,16 @@ with c4:
     st.write("")
     run = st.button("Analyze", type="primary", width="stretch")
 
+LAYOUTS = {
+    "Price panel + profile": "panel",
+    "Overlay (price, profile and GEX together)": "overlay",
+    "Profile + GEX only": "profile",
+}
+layout_label = st.radio("Chart layout", list(LAYOUTS.keys()), horizontal=True,
+                        help="Price panel: price on the left, same price scale as the profile. "
+                             "Overlay: price, volume profile (from the left) and net GEX (centered) "
+                             "in one plot.")
+
 defaults = core.make_instrument(kind, ticker or "X")
 with st.expander("Advanced settings (windows)"):
     a1, a2, a3 = st.columns(3)
@@ -139,7 +149,8 @@ if run:
                                     magnet_short=magnet_short, magnet_long=magnet_long)
         try:
             with st.spinner(f"Downloading data and running the analysis for {inst['name']}..."):
-                res = core.analyze(inst, vp_days=vp_days, exp_days_long=exp_days_long)
+                res = core.analyze(inst, vp_days=vp_days, exp_days_long=exp_days_long,
+                                   layout=LAYOUTS[layout_label])
             for ch in res["charts"]:
                 ch["png"] = fig_to_png(ch.pop("fig"))
             st.session_state["result"] = res
